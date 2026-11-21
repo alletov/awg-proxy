@@ -44,11 +44,10 @@ AWG Home создаёт только собственные nftables-табли�
 
 ## Быстрый запуск из GitHub
 
-После публикации замените `OWNER/awg-proxy` на имя своего репозитория в
-`install.sh` и используйте:
+Установите проект одной командой:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/OWNER/awg-proxy/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/alletov/awg-proxy/main/install.sh \
   -o /tmp/awghome-install.sh
 sudo bash /tmp/awghome-install.sh
 ```
@@ -56,7 +55,7 @@ sudo bash /tmp/awghome-install.sh
 Вариант без изменения `install.sh`:
 
 ```bash
-sudo AWGHOME_REPO=OWNER/awg-proxy bash /tmp/awghome-install.sh
+sudo AWGHOME_REPO=alletov/awg-proxy bash /tmp/awghome-install.sh
 ```
 
 Скачивание в отдельный файл сделано намеренно: пользователь может проверить

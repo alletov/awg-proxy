@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-REPO="${AWGHOME_REPO:-OWNER/awg-proxy}"
+REPO="${AWGHOME_REPO:-alletov/awg-proxy}"
 BRANCH="${AWGHOME_BRANCH:-main}"
 INSTALL_DIR="/opt/awghome"
 
@@ -21,7 +21,6 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "$script_dir/awghome.sh" && -d "$script_dir/lib" ]]; then
   source_dir="$script_dir"
 else
-  [[ $REPO != OWNER/* ]] || die "set AWGHOME_REPO=github-user/repository before publishing"
   command -v curl >/dev/null || { apt-get update; apt-get install -y curl ca-certificates; }
   archive="$tmp_dir/source.tar.gz"
   curl --fail --location --silent --show-error \
