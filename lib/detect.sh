@@ -7,8 +7,8 @@ detect_network() {
   DETECT_LAN_IP=$(awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' <<< "$route")
   DETECT_LAN_GW=$(awk '{for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}' <<< "$route")
   [[ -n $DETECT_LAN_IF && -n $DETECT_LAN_IP && -n $DETECT_LAN_GW ]] || return 1
-  DETECT_LAN_PREFIX=$(ip -o -4 addr show dev "$DETECT_LAN_IF" scope global | awk -v ip="$DETECT_LAN_IP" '$4 ~ "^"ip"/" {print $4; exit}')
-  [[ -n $DETECT_LAN_PREFIX ]] || DETECT_LAN_PREFIX=$(ip -o -4 addr show dev "$DETECT_LAN_IF" scope global | awk 'NR==1 {print $4}')
+  DETECT_LAN_PREFIX=$(ip -4 route show dev "$DETECT_LAN_IF" proto kernel scope link | awk 'NR==1 {print $1}')
+  [[ -n $DETECT_LAN_PREFIX ]] || return 1
 }
 
 show_readonly_diagnostics() {
