@@ -6,7 +6,7 @@ install_packages() {
   source /etc/os-release
   case "${VERSION_ID:-}" in
     22.04|24.04) ;;
-    *) [[ ${AWGHOME_UNSUPPORTED_OS:-0} == 1 ]] || die "supported Ubuntu releases: 22.04 and 24.04 (set AWGHOME_UNSUPPORTED_OS=1 to test another release)" ;;
+    *) [[ ${AWGPROXY_UNSUPPORTED_OS:-0} == 1 ]] || die "supported Ubuntu releases: 22.04 and 24.04 (set AWGPROXY_UNSUPPORTED_OS=1 to test another release)" ;;
   esac
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
@@ -30,7 +30,7 @@ create_backup() {
   ip -4 route show table all > "$dir/routes.txt"
   ip rule > "$dir/rules.txt"
   nft list ruleset > "$dir/nftables.rules"
-  [[ -f $AWGHOME_CONFIG ]] && cp -a "$AWGHOME_CONFIG" "$dir/awghome.conf"
+  [[ -f $AWGPROXY_CONFIG ]] && cp -a "$AWGPROXY_CONFIG" "$dir/awgproxy.conf"
   [[ -f $AWG_CONFIG ]] && cp -a "$AWG_CONFIG" "$dir/awg0.conf"
   printf '%s' "$dir"
 }
@@ -38,10 +38,10 @@ create_backup() {
 arm_rollback() {
   local backup=$1 unit
   touch "$backup/ARMED"
-  unit="awghome-rollback-$(date +%s)"
+  unit="awgproxy-rollback-$(date +%s)"
   printf '%s' "$unit" > "$backup/ROLLBACK_UNIT"
   systemd-run --unit="$unit" --on-active=5m \
-    /usr/local/lib/awghome/rollback.sh "$backup" >/dev/null
+    /usr/local/lib/awgproxy/rollback.sh "$backup" >/dev/null
   info "automatic rollback armed for 5 minutes"
 }
 
@@ -58,13 +58,13 @@ apply_configuration() {
   local backup=${1:-}
   [[ -n $backup ]] || backup=$(create_backup)
   render_runtime_files
-  nft -c -f "$AWGHOME_DIR/nftables.conf"
+  nft -c -f "$AWGPROXY_DIR/nftables.conf"
   systemctl daemon-reload
   arm_rollback "$backup"
   sysctl --system >/dev/null
-  systemctl enable awghome-routes awghome-firewall awg-quick@awg0
+  systemctl enable awgproxy-routes awgproxy-firewall awg-quick@awg0
   systemctl stop awg-quick@awg0 2>/dev/null || true
-  systemctl restart awghome-routes awghome-firewall
+  systemctl restart awgproxy-routes awgproxy-firewall
   systemctl start awg-quick@awg0
   if (( ENABLE_DNS )); then systemctl enable unbound; systemctl restart unbound; else systemctl disable --now unbound 2>/dev/null || true; fi
   if (( ENABLE_SOCKS )); then systemctl enable danted; systemctl restart danted; else systemctl disable --now danted 2>/dev/null || true; fi
@@ -99,7 +99,7 @@ validate_installation() {
   internet_route=$(ip -4 route get 1.1.1.1 2>/dev/null || true)
   [[ $internet_route == *"dev awg0"* ]] && ok "server Internet route uses awg0" || { warn "server Internet route does not use awg0: $internet_route"; failures=$((failures+1)); }
   [[ $(cat /proc/sys/net/ipv4/ip_forward) == 1 ]] && ok "IPv4 forwarding is enabled" || { warn "IPv4 forwarding is disabled"; failures=$((failures+1)); }
-  nft list table inet awghome_filter >/dev/null 2>&1 && nft list table ip awghome_nat >/dev/null 2>&1 && ok "nftables policy is loaded" || { warn "nftables policy missing"; failures=$((failures+1)); }
+  nft list table inet awgproxy_filter >/dev/null 2>&1 && nft list table ip awgproxy_nat >/dev/null 2>&1 && ok "nftables policy is loaded" || { warn "nftables policy missing"; failures=$((failures+1)); }
   if [[ -n $AWG_EXPECTED_EGRESS ]]; then
     egress=$(curl --interface awg0 --max-time 10 -fsS https://api.ipify.org 2>/dev/null || true)
     [[ $egress == "$AWG_EXPECTED_EGRESS" ]] && ok "VPN egress matches $AWG_EXPECTED_EGRESS" || { warn "unexpected VPN egress: ${egress:-unavailable}"; failures=$((failures+1)); }
@@ -115,8 +115,8 @@ validate_installation() {
 
 show_status() {
   load_config
-  printf 'AWG Home status\n\n'
-  systemctl --no-pager --full status awg-quick@awg0 awghome-routes awghome-firewall 2>/dev/null || true
+  printf 'AWG Proxy status\n\n'
+  systemctl --no-pager --full status awg-quick@awg0 awgproxy-routes awgproxy-firewall 2>/dev/null || true
   (( ENABLE_DNS )) && systemctl --no-pager --full status unbound 2>/dev/null || true
   (( ENABLE_SOCKS )) && systemctl --no-pager --full status danted 2>/dev/null || true
   printf '\nTunnel:\n'; awg show awg0 2>/dev/null || true
@@ -129,7 +129,7 @@ show_stats() {
   printf '%-28s %s\n' 'Uptime:' "$(uptime -p)"
   local age; age=$(handshake_age 2>/dev/null) && printf '%-28s %s seconds\n' 'AWG handshake age:' "$age" || printf '%-28s %s\n' 'AWG handshake age:' 'none'
   printf '\nAWG transfer counters:\n'; awg show awg0 transfer 2>/dev/null || true
-  printf '\nFirewall/NAT counters:\n'; nft list table inet awghome_filter 2>/dev/null || true; nft list table ip awghome_nat 2>/dev/null || true
+  printf '\nFirewall/NAT counters:\n'; nft list table inet awgproxy_filter 2>/dev/null || true; nft list table ip awgproxy_nat 2>/dev/null || true
 }
 
 collect_report() {
@@ -138,15 +138,15 @@ collect_report() {
   install -d -m 0700 "$report_dir"
   report="$report_dir/report-$(date -u +%Y%m%dT%H%M%SZ).txt"
   {
-    printf 'AWG Home redacted report\nGenerated: %s\n\n' "$(date -u --iso-8601=seconds)"
+    printf 'AWG Proxy redacted report\nGenerated: %s\n\n' "$(date -u --iso-8601=seconds)"
     print_config_redacted
     printf '\nService state:\n'
-    systemctl is-active awg-quick@awg0 awghome-routes awghome-firewall unbound danted 2>&1 || true
+    systemctl is-active awg-quick@awg0 awgproxy-routes awgproxy-firewall unbound danted 2>&1 || true
     printf '\nAWG state (private key hidden by awg):\n'; awg show awg0 2>&1 || true
     printf '\nIP rules:\n'; ip rule 2>&1 || true
     printf '\nRoutes:\n'; ip -4 route show table all 2>&1 || true
     printf '\nListeners:\n'; ss -lntup 2>&1 || true
-    printf '\nAWG Home firewall counters:\n'; nft list table inet awghome_filter 2>&1 || true; nft list table ip awghome_nat 2>&1 || true
+    printf '\nAWG Proxy firewall counters:\n'; nft list table inet awgproxy_filter 2>&1 || true; nft list table ip awgproxy_nat 2>&1 || true
   } > "$report"
   chmod 0600 "$report"
   ok "redacted report saved: $report"
@@ -154,7 +154,7 @@ collect_report() {
 
 restart_services() {
   require_root; load_config
-  systemctl restart awghome-routes awghome-firewall awg-quick@awg0
+  systemctl restart awgproxy-routes awgproxy-firewall awg-quick@awg0
   (( ENABLE_DNS )) && systemctl restart unbound
   (( ENABLE_SOCKS )) && systemctl restart danted
   validate_installation

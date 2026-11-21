@@ -12,8 +12,8 @@ jobs:
       - name: Install test tools
         run: sudo apt-get update && sudo apt-get install -y shellcheck bats
       - name: Bash syntax
-        run: bash -n install.sh awghome.sh lib/*.sh
+        run: bash -n install.sh awgproxy.sh lib/*.sh
       - name: ShellCheck
-        run: shellcheck --severity=error install.sh awghome.sh lib/*.sh
+        run: shellcheck --severity=error install.sh awgproxy.sh lib/*.sh
       - name: Unit tests
         run: bats tests

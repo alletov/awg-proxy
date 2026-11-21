@@ -17,9 +17,9 @@ VERSION=$(cat "$SCRIPT_DIR/version" 2>/dev/null || printf 'dev')
 
 usage() {
   cat <<EOF
-AWG Home $VERSION — AmneziaWG gateway manager
+AWG Proxy $VERSION — AmneziaWG gateway manager
 
-Usage: awghome [command]
+Usage: awgproxy [command]
   menu          interactive management menu (default)
   install       initial setup or full reconfiguration
   config        show redacted effective configuration
@@ -38,7 +38,7 @@ EOF
 
 initial_install() {
   require_root
-  if [[ -e $AWGHOME_CONFIG ]]; then
+  if [[ -e $AWGPROXY_CONFIG ]]; then
     change_configuration
     return
   fi
@@ -67,7 +67,7 @@ safe_reboot() {
 menu() {
   while true; do
     clear 2>/dev/null || true
-    printf 'AWG Home %s\n\n' "$VERSION"
+    printf 'AWG Proxy %s\n\n' "$VERSION"
     printf '  1) Status\n  2) Run checks\n  3) Statistics\n  4) Show configuration\n'
     printf '  5) Change configuration\n  6) Restart services\n  7) Diagnostics\n  8) Create backup\n'
     printf '  9) Save support report\n 10) Reboot server\n  0) Exit\n\n'

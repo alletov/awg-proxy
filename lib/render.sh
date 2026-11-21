@@ -2,21 +2,21 @@
 
 render_runtime_files() {
   load_config
-  install -d -m 0755 /usr/local/lib/awghome /etc/systemd/system
+  install -d -m 0755 /usr/local/lib/awgproxy /etc/systemd/system
   render_routes_script
   render_firewall
   render_rollback_script
   render_systemd_units
   (( ENABLE_DNS )) && render_unbound
   (( ENABLE_SOCKS )) && render_dante
-  printf 'net.ipv4.ip_forward = 1\n' > /etc/sysctl.d/90-awghome-forwarding.conf
+  printf 'net.ipv4.ip_forward = 1\n' > /etc/sysctl.d/90-awgproxy-forwarding.conf
 }
 
 render_routes_script() {
-  cat > /usr/local/lib/awghome/routes.sh <<'EOF'
+  cat > /usr/local/lib/awgproxy/routes.sh <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
-source /etc/awghome/awghome.conf
+source /etc/awgproxy/awgproxy.conf
 metric=50
 route_proto=186
 case "${1:-up}" in
@@ -41,15 +41,15 @@ case "${1:-up}" in
   *) echo "Usage: $0 {up|down}" >&2; exit 2 ;;
 esac
 EOF
-  chmod 0755 /usr/local/lib/awghome/routes.sh
+  chmod 0755 /usr/local/lib/awgproxy/routes.sh
 }
 
 render_firewall() {
   local vpn_nft service_nft
   vpn_nft=$(csv_to_nft "$VPN_CLIENT_NETWORKS")
   service_nft=$(csv_to_nft "$SERVICE_CLIENT_NETWORKS")
-  cat > "$AWGHOME_DIR/nftables.conf" <<EOF
-table inet awghome_filter {
+  cat > "$AWGPROXY_DIR/nftables.conf" <<EOF
+table inet awgproxy_filter {
   set vpn_clients { type ipv4_addr; flags interval; elements = { $vpn_nft } }
   set service_clients { type ipv4_addr; flags interval; elements = { $service_nft } }
 
@@ -77,7 +77,7 @@ table inet awghome_filter {
   }
 }
 
-table ip awghome_nat {
+table ip awgproxy_nat {
   set vpn_clients { type ipv4_addr; flags interval; elements = { $vpn_nft } }
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
@@ -86,23 +86,23 @@ table ip awghome_nat {
 }
 EOF
 
-  cat > /usr/local/lib/awghome/firewall-apply.sh <<'EOF'
+  cat > /usr/local/lib/awgproxy/firewall-apply.sh <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
-config=/etc/awghome/nftables.conf
+config=/etc/awgproxy/nftables.conf
 nft -c -f "$config"
-nft list table inet awghome_filter >/dev/null 2>&1 && nft delete table inet awghome_filter
-nft list table ip awghome_nat >/dev/null 2>&1 && nft delete table ip awghome_nat
+nft list table inet awgproxy_filter >/dev/null 2>&1 && nft delete table inet awgproxy_filter
+nft list table ip awgproxy_nat >/dev/null 2>&1 && nft delete table ip awgproxy_nat
 nft -f "$config"
 EOF
-  chmod 0755 /usr/local/lib/awghome/firewall-apply.sh
+  chmod 0755 /usr/local/lib/awgproxy/firewall-apply.sh
 }
 
 render_unbound() {
   local acl_lines='' item
   IFS=, read -r -a networks <<< "$SERVICE_CLIENT_NETWORKS"
   for item in "${networks[@]}"; do acl_lines+="  access-control: $item allow"$'\n'; done
-  cat > /etc/unbound/unbound.conf.d/awghome.conf <<EOF
+  cat > /etc/unbound/unbound.conf.d/awgproxy.conf <<EOF
 server:
   interface: 127.0.0.1
   interface: $LAN_IP
@@ -134,10 +134,10 @@ user.notprivileged: nobody
 $client_rules
 $socks_rules
 EOF
-  cat > /usr/local/lib/awghome/dante-ready.sh <<'EOF'
+  cat > /usr/local/lib/awgproxy/dante-ready.sh <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
-source /etc/awghome/awghome.conf
+source /etc/awgproxy/awgproxy.conf
 for ((i=0; i<60; i++)); do
   ip -4 addr show dev "$LAN_IF" | grep -Fq "inet $LAN_IP/" || { sleep 1; continue; }
   ip link show dev awg0 2>/dev/null | grep -q 'state UNKNOWN\|state UP' || { sleep 1; continue; }
@@ -149,78 +149,78 @@ done
 echo "awg0 did not become ready within 60 seconds" >&2
 exit 1
 EOF
-  chmod 0755 /usr/local/lib/awghome/dante-ready.sh
+  chmod 0755 /usr/local/lib/awgproxy/dante-ready.sh
 }
 
 render_rollback_script() {
-  cat > /usr/local/lib/awghome/rollback.sh <<'EOF'
+  cat > /usr/local/lib/awgproxy/rollback.sh <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 backup=${1:?backup directory required}
 [[ -e "$backup/ARMED" ]] || exit 0
-logger -t awghome "automatic network rollback started"
+logger -t awgproxy "automatic network rollback started"
 systemctl stop awg-quick@awg0.service 2>/dev/null || true
 if [[ -s "$backup/nftables.rules" ]]; then
   nft flush ruleset
   nft -f "$backup/nftables.rules"
 fi
-cp -a "$backup/awghome.conf" /etc/awghome/awghome.conf 2>/dev/null || true
+cp -a "$backup/awgproxy.conf" /etc/awgproxy/awgproxy.conf 2>/dev/null || true
 cp -a "$backup/awg0.conf" /etc/amnezia/amneziawg/awg0.conf 2>/dev/null || true
-/usr/local/lib/awghome/routes.sh down 2>/dev/null || true
-/usr/local/lib/awghome/routes.sh up 2>/dev/null || true
-logger -t awghome "automatic network rollback completed"
+/usr/local/lib/awgproxy/routes.sh down 2>/dev/null || true
+/usr/local/lib/awgproxy/routes.sh up 2>/dev/null || true
+logger -t awgproxy "automatic network rollback completed"
 EOF
-  chmod 0755 /usr/local/lib/awghome/rollback.sh
+  chmod 0755 /usr/local/lib/awgproxy/rollback.sh
 }
 
 render_systemd_units() {
-  cat > /etc/systemd/system/awghome-routes.service <<'EOF'
+  cat > /etc/systemd/system/awgproxy-routes.service <<'EOF'
 [Unit]
-Description=AWG Home protected routes
+Description=AWG Proxy protected routes
 Before=awg-quick@awg0.service
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/lib/awghome/routes.sh up
-ExecStop=/usr/local/lib/awghome/routes.sh down
+ExecStart=/usr/local/lib/awgproxy/routes.sh up
+ExecStop=/usr/local/lib/awgproxy/routes.sh down
 RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
 EOF
-  cat > /etc/systemd/system/awghome-firewall.service <<'EOF'
+  cat > /etc/systemd/system/awgproxy-firewall.service <<'EOF'
 [Unit]
-Description=AWG Home nftables policy
+Description=AWG Proxy nftables policy
 Before=awg-quick@awg0.service
-After=awghome-routes.service nftables.service
-Wants=awghome-routes.service
+After=awgproxy-routes.service nftables.service
+Wants=awgproxy-routes.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/lib/awghome/firewall-apply.sh
+ExecStart=/usr/local/lib/awgproxy/firewall-apply.sh
 RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
 EOF
   install -d -m 0755 /etc/systemd/system/awg-quick@awg0.service.d
-  cat > /etc/systemd/system/awg-quick@awg0.service.d/awghome.conf <<'EOF'
+  cat > /etc/systemd/system/awg-quick@awg0.service.d/awgproxy.conf <<'EOF'
 [Unit]
-Requires=awghome-routes.service awghome-firewall.service
-After=awghome-routes.service awghome-firewall.service systemd-networkd.service
+Requires=awgproxy-routes.service awgproxy-firewall.service
+After=awgproxy-routes.service awgproxy-firewall.service systemd-networkd.service
 PartOf=systemd-networkd.service
 EOF
   if (( ENABLE_SOCKS )); then
     install -d -m 0755 /etc/systemd/system/danted.service.d
-    cat > /etc/systemd/system/danted.service.d/awghome.conf <<'EOF'
+    cat > /etc/systemd/system/danted.service.d/awgproxy.conf <<'EOF'
 [Unit]
 Requires=awg-quick@awg0.service
 After=awg-quick@awg0.service
 
 [Service]
-ExecStartPre=/usr/local/lib/awghome/dante-ready.sh
+ExecStartPre=/usr/local/lib/awgproxy/dante-ready.sh
 EOF
   fi
 }
