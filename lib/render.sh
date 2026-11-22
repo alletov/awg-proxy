@@ -6,10 +6,34 @@ render_runtime_files() {
   render_routes_script
   render_firewall
   render_rollback_script
+  render_lan_bindings_script
   render_systemd_units
   (( ENABLE_DNS )) && render_unbound
   (( ENABLE_SOCKS )) && render_dante
   printf 'net.ipv4.ip_forward = 1\n' > /etc/sysctl.d/90-awgproxy-forwarding.conf
+}
+
+render_lan_bindings_script() {
+  cat > /usr/local/lib/awgproxy/lan-bindings.sh <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source /opt/awgproxy/lib/common.sh
+source /opt/awgproxy/lib/render.sh
+load_config saved
+[[ ${LAN_ADDRESS_MODE:-static} == auto ]] || exit 0
+
+for ((attempt=0; attempt<30; attempt++)); do
+  if LAN_IP=$(current_lan_ipv4 "$LAN_IF"); then
+    render_firewall
+    if (( ENABLE_DNS )); then render_unbound; fi
+    if (( ENABLE_SOCKS )); then render_dante; fi
+    exit 0
+  fi
+  sleep 1
+done
+die "no unique primary IPv4 on $LAN_IF after 30 seconds"
+EOF
+  chmod 0755 /usr/local/lib/awgproxy/lan-bindings.sh
 }
 
 render_routes_script() {
@@ -134,10 +158,13 @@ user.notprivileged: nobody
 $client_rules
 $socks_rules
 EOF
-  cat > /usr/local/lib/awgproxy/dante-ready.sh <<'EOF'
+  {
+    cat <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
-source /etc/awgproxy/awgproxy.conf
+EOF
+    printf 'LAN_IF=%q\nLAN_IP=%q\n' "$LAN_IF" "$LAN_IP"
+    cat <<'EOF'
 for ((i=0; i<60; i++)); do
   ip -4 addr show dev "$LAN_IF" | grep -Fq "inet $LAN_IP/" || { sleep 1; continue; }
   ip link show dev awg0 2>/dev/null | grep -q 'state UNKNOWN\|state UP' || { sleep 1; continue; }
@@ -149,6 +176,7 @@ done
 echo "awg0 did not become ready within 60 seconds" >&2
 exit 1
 EOF
+  } > /usr/local/lib/awgproxy/dante-ready.sh
   chmod 0755 /usr/local/lib/awgproxy/dante-ready.sh
 }
 
@@ -174,6 +202,17 @@ EOF
 }
 
 render_systemd_units() {
+  cat > /etc/systemd/system/awgproxy-lan-bindings.service <<'EOF'
+[Unit]
+Description=AWG Proxy LAN address and service bindings
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/awgproxy/lan-bindings.sh
+RemainAfterExit=yes
+EOF
   cat > /etc/systemd/system/awgproxy-routes.service <<'EOF'
 [Unit]
 Description=AWG Proxy protected routes
@@ -194,8 +233,8 @@ EOF
 [Unit]
 Description=AWG Proxy nftables policy
 Before=awg-quick@awg0.service
-After=awgproxy-routes.service nftables.service
-Wants=awgproxy-routes.service
+Requires=awgproxy-lan-bindings.service
+After=awgproxy-lan-bindings.service nftables.service
 
 [Service]
 Type=oneshot
@@ -212,6 +251,14 @@ Requires=awgproxy-routes.service awgproxy-firewall.service
 After=awgproxy-routes.service awgproxy-firewall.service systemd-networkd.service
 PartOf=systemd-networkd.service
 EOF
+  if (( ENABLE_DNS )); then
+    install -d -m 0755 /etc/systemd/system/unbound.service.d
+    cat > /etc/systemd/system/unbound.service.d/awgproxy.conf <<'EOF'
+[Unit]
+Requires=awgproxy-firewall.service
+After=awgproxy-firewall.service
+EOF
+  fi
   if (( ENABLE_SOCKS )); then
     install -d -m 0755 /etc/systemd/system/danted.service.d
     cat > /etc/systemd/system/danted.service.d/awgproxy.conf <<'EOF'

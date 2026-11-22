@@ -21,9 +21,10 @@ AWG Proxy $VERSION — AmneziaWG gateway manager
 
 Usage: awgproxy [command]
   menu          interactive management menu (default)
-  install       initial setup or full reconfiguration
+  install       initial setup or open configuration menu
   config        show redacted effective configuration
-  change        change gateway settings
+  change [lan|awg|networks|services]
+                open configuration menu or edit one section
   status        services, tunnel, routes and listeners
   check         run readiness and safety checks
   stats         tunnel and firewall counters
@@ -43,17 +44,50 @@ initial_install() {
     return
   fi
   configure_wizard
+  save_nonsecret_config
+  prepare_awg_config "$AWG_SOURCE_CONFIG"
   install_packages
   apply_configuration
 }
 
 change_configuration() {
   require_root
-  local backup
+  local choice section
+  while true; do
+    printf '\nНастройки AWG Proxy\n\n'
+    printf '  1) Настройки LAN\n  2) Настройки AmneziaWG\n  3) Сети доступа и маршруты\n'
+    printf '  4) DNS и SOCKS5\n  0) Назад\n\n'
+    read -r -p 'Выбор [0]: ' choice || return 0
+    case ${choice:-0} in
+      1) section=lan ;;
+      2) section=awg ;;
+      3) section=networks ;;
+      4) section=services ;;
+      0) return 0 ;;
+      *) warn "unknown choice"; continue ;;
+    esac
+    "$BASH" "$SCRIPT_DIR/awgproxy.sh" change "$section" || true
+    pause
+  done
+}
+
+change_configuration_section() {
+  require_root
+  local section=$1 backup
+  case $section in
+    lan|awg|networks|services) ;;
+    *) die "unknown configuration section: $section" ;;
+  esac
+  load_config saved
+  if ! configure_wizard "$section"; then
+    info "configuration unchanged"
+    return 0
+  fi
   backup=$(create_backup)
   info "pre-change backup: $backup"
-  configure_wizard
-  apply_configuration "$backup"
+  save_nonsecret_config
+  if [[ $section == awg ]]; then prepare_awg_config "$AWG_SOURCE_CONFIG"; fi
+  apply_configuration "$backup" "$section"
 }
 
 safe_reboot() {
@@ -67,22 +101,30 @@ safe_reboot() {
 menu() {
   while true; do
     clear 2>/dev/null || true
-    printf 'AWG Proxy %s\n\n' "$VERSION"
-    printf '  1) Status\n  2) Run checks\n  3) Statistics\n  4) Show configuration\n'
-    printf '  5) Change configuration\n  6) Restart services\n  7) Diagnostics\n  8) Create backup\n'
-    printf '  9) Save support report\n 10) Reboot server\n  0) Exit\n\n'
-    read -r -p 'Select: ' choice
-    case $choice in
-      1) show_status; pause ;;
-      2) validate_installation; pause ;;
-      3) show_stats; pause ;;
-      4) print_config_redacted; pause ;;
-      5) change_configuration; pause ;;
-      6) restart_services; pause ;;
-      7) show_readonly_diagnostics; pause ;;
-      8) printf 'Backup: %s\n' "$(create_backup)"; pause ;;
-      9) collect_report; pause ;;
-      10) safe_reboot; return ;;
+    if [[ -r $AWGPROXY_CONFIG ]]; then
+      show_status
+    else
+      printf 'AWG Proxy %s\n\n' "$VERSION"
+      if (( EUID == 0 )); then
+        printf 'Статус:     НЕ НАСТРОЕН\n'
+      else
+        printf 'Статус:     для просмотра запустите sudo awgproxy\n'
+      fi
+    fi
+    printf '\n  1) Run checks\n  2) Statistics\n  3) Show configuration\n'
+    printf '  4) Change configuration\n  5) Restart services\n  6) Diagnostics\n  7) Create backup\n'
+    printf '  8) Save support report\n  9) Reboot server\n  0) Exit\n\n'
+    read -r -p 'Select [0]: ' choice || return 0
+    case ${choice:-0} in
+      1) validate_installation; pause ;;
+      2) show_stats; pause ;;
+      3) print_config_redacted; pause ;;
+      4) change_configuration ;;
+      5) restart_services; pause ;;
+      6) show_readonly_diagnostics; pause ;;
+      7) printf 'Backup: %s\n' "$(create_backup)"; pause ;;
+      8) collect_report; pause ;;
+      9) safe_reboot; return ;;
       0) return ;;
       *) warn "unknown choice"; pause ;;
     esac
@@ -93,7 +135,9 @@ case ${1:-menu} in
   menu) menu ;;
   install) initial_install ;;
   config) print_config_redacted ;;
-  change) change_configuration ;;
+  change)
+    if [[ -n ${2:-} ]]; then change_configuration_section "$2"; else change_configuration; fi
+    ;;
   status) show_status ;;
   check) validate_installation ;;
   stats) show_stats ;;

@@ -55,17 +55,24 @@ disarm_rollback() {
 
 apply_configuration() {
   require_root
-  local backup=${1:-}
+  local backup=${1:-} section=${2:-all}
   [[ -n $backup ]] || backup=$(create_backup)
   render_runtime_files
   nft -c -f "$AWGPROXY_DIR/nftables.conf"
   systemctl daemon-reload
   arm_rollback "$backup"
-  sysctl --system >/dev/null
-  systemctl enable awgproxy-routes awgproxy-firewall awg-quick@awg0
-  systemctl stop awg-quick@awg0 2>/dev/null || true
-  systemctl restart awgproxy-routes awgproxy-firewall
-  systemctl start awg-quick@awg0
+  case $section in
+    all|lan|awg)
+      sysctl --system >/dev/null
+      systemctl enable awgproxy-routes awgproxy-firewall awg-quick@awg0
+      systemctl stop awg-quick@awg0 2>/dev/null || true
+      systemctl restart awgproxy-lan-bindings
+      systemctl restart awgproxy-routes awgproxy-firewall
+      systemctl start awg-quick@awg0
+      ;;
+    networks) systemctl restart awgproxy-routes awgproxy-firewall ;;
+    services) ;;
+  esac
   if (( ENABLE_DNS )); then systemctl enable unbound; systemctl restart unbound; else systemctl disable --now unbound 2>/dev/null || true; fi
   if (( ENABLE_SOCKS )); then systemctl enable danted; systemctl restart danted; else systemctl disable --now danted 2>/dev/null || true; fi
   if validate_installation; then
@@ -101,12 +108,16 @@ lan_gateway_is_on_link() {
     '
 }
 
+has_lan_listener() {
+  local protocol=$1 port=$2
+  ss -H -4 "-ln$protocol" "sport = :$port" 2>/dev/null |
+    awk -v address="$LAN_IP:$port" '$4 == address { found = 1 } END { exit !found }'
+}
+
 wait_for_socks_listener() {
-  local attempt sockets
+  local attempt
   for ((attempt=0; attempt<10; attempt++)); do
-    if service_active danted &&
-       sockets=$(ss -H -4 -lnt 'sport = :1080') &&
-       awk -v address="$LAN_IP:1080" '$4 == address { found = 1 } END { exit !found }' <<< "$sockets"; then
+    if service_active danted && has_lan_listener t 1080; then
       return 0
     fi
     sleep 1
@@ -116,7 +127,7 @@ wait_for_socks_listener() {
 
 validate_installation() {
   load_config
-  local failures=0 age route internet_route egress
+  local failures=0 age route internet_route
   service_active awg-quick@awg0 && ok "awg0 service is active" || { warn "awg0 service is inactive"; failures=$((failures+1)); }
   age=$(handshake_age) && [[ $age -le 180 ]] && ok "AWG handshake age: ${age}s" || { warn "AWG handshake is missing or stale"; failures=$((failures+1)); }
   route=$(ip -4 route get "$AWG_ENDPOINT_IP" 2>/dev/null || true)
@@ -126,10 +137,6 @@ validate_installation() {
   [[ $internet_route == *"dev awg0"* ]] && ok "server Internet route uses awg0" || { warn "server Internet route does not use awg0: $internet_route"; failures=$((failures+1)); }
   [[ $(cat /proc/sys/net/ipv4/ip_forward) == 1 ]] && ok "IPv4 forwarding is enabled" || { warn "IPv4 forwarding is disabled"; failures=$((failures+1)); }
   nft list table inet awgproxy_filter >/dev/null 2>&1 && nft list table ip awgproxy_nat >/dev/null 2>&1 && ok "nftables policy is loaded" || { warn "nftables policy missing"; failures=$((failures+1)); }
-  if [[ -n $AWG_EXPECTED_EGRESS ]]; then
-    egress=$(curl --interface awg0 --max-time 10 -fsS https://api.ipify.org 2>/dev/null || true)
-    [[ $egress == "$AWG_EXPECTED_EGRESS" ]] && ok "VPN egress matches $AWG_EXPECTED_EGRESS" || { warn "unexpected VPN egress: ${egress:-unavailable}"; failures=$((failures+1)); }
-  fi
   if (( ENABLE_DNS )); then
     if service_active unbound && ss -lnut | grep -qE "${LAN_IP//./\\.}:53[[:space:]]"; then ok "DNS is listening on the LAN address"; else warn "DNS validation failed"; failures=$((failures+1)); fi
   fi
@@ -146,13 +153,53 @@ validate_installation() {
 
 show_status() {
   load_config
-  printf 'AWG Proxy status\n\n'
-  systemctl --no-pager --full status awg-quick@awg0 awgproxy-routes awgproxy-firewall 2>/dev/null || true
-  (( ENABLE_DNS )) && systemctl --no-pager --full status unbound 2>/dev/null || true
-  (( ENABLE_SOCKS )) && systemctl --no-pager --full status danted 2>/dev/null || true
-  printf '\nTunnel:\n'; awg show awg0 2>/dev/null || true
-  printf '\nManaged routes:\n'; ip -4 route show proto 186 || true
-  printf '\nSockets:\n'; ss -lntup | grep -E "(${LAN_IP//./\\.}:(53|1080)|Local Address)" || true
+  local status='РАБОТАЕТ' color=$C_GREEN tunnel='ОСТАНОВЛЕН' tunnel_color=$C_RED
+  local handshake=''
+  local external_ip='—' dns='отключён' socks='отключён' ip age
+  if service_active awg-quick@awg0; then
+    tunnel='АКТИВЕН'
+    tunnel_color=$C_GREEN
+    if ip=$(curl -q -4 --noproxy '*' --interface awg0 --max-time 5 -fsS https://api.ipify.org 2>/dev/null) &&
+       is_ipv4 "$ip"; then
+      external_ip=$ip
+    else
+      external_ip='не удалось определить'
+    fi
+    if age=$(handshake_age 2>/dev/null) && (( age >= 0 )); then
+      handshake=" · рукопожатие ${age} с назад"
+    fi
+  else
+    status='НЕ РАБОТАЕТ'
+  fi
+  if (( ENABLE_DNS )); then
+    if service_active unbound && has_lan_listener t 53 && has_lan_listener u 53; then
+      dns="$LAN_IP:53"
+    else
+      dns='недоступен'
+      if [[ $status == 'РАБОТАЕТ' ]]; then status='ЕСТЬ ПРОБЛЕМЫ'; fi
+    fi
+  fi
+  if (( ENABLE_SOCKS )); then
+    if service_active danted && has_lan_listener t 1080; then
+      socks="$LAN_IP:1080"
+    else
+      socks='недоступен'
+      if [[ $status == 'РАБОТАЕТ' ]]; then status='ЕСТЬ ПРОБЛЕМЫ'; fi
+    fi
+  fi
+  if [[ $status == 'РАБОТАЕТ' ]] &&
+     ! { service_active awgproxy-routes && service_active awgproxy-firewall &&
+         lan_gateway_is_on_link && [[ $(< /proc/sys/net/ipv4/ip_forward) == 1 ]]; }; then
+    status='ЕСТЬ ПРОБЛЕМЫ С МАРШРУТИЗАЦИЕЙ'
+  fi
+  case $status in
+    'РАБОТАЕТ') ;;
+    'НЕ РАБОТАЕТ') color=$C_RED ;;
+    *) color=$C_YELLOW ;;
+  esac
+  printf 'AWG Proxy %s\n\nСтатус:     %s%s%s\nВнешний IP: %s\nТоннель:    %s%s%s%s\nLAN-шлюз:   %s (%s)\nDNS:        %s\nSOCKS5:     %s\n' \
+    "$VERSION" "$color" "$status" "$C_RESET" "$external_ip" \
+    "$tunnel_color" "$tunnel" "$C_RESET" "$handshake" "$LAN_IP" "$LAN_IF" "$dns" "$socks"
 }
 
 show_stats() {
@@ -185,6 +232,9 @@ collect_report() {
 
 restart_services() {
   require_root; load_config
+  if [[ ${LAN_ADDRESS_MODE:-static} == auto ]]; then
+    systemctl restart awgproxy-lan-bindings
+  fi
   systemctl restart awgproxy-routes awgproxy-firewall awg-quick@awg0
   (( ENABLE_DNS )) && systemctl restart unbound
   (( ENABLE_SOCKS )) && systemctl restart danted
@@ -194,6 +244,7 @@ restart_services() {
 print_config_redacted() {
   load_config
   printf 'LAN_IF=%s\nLAN_IP=%s\nLAN_PREFIX=%s\nLAN_GW=%s\n' "$LAN_IF" "$LAN_IP" "$LAN_PREFIX" "$LAN_GW"
+  printf 'LAN_ADDRESS_MODE=%s\n' "${LAN_ADDRESS_MODE:-static}"
   printf 'AWG_ENDPOINT=%s\nAWG_MTU=%s\nTCP_MSS=%s\n' "$AWG_ENDPOINT_RAW" "$AWG_MTU" "$TCP_MSS"
   printf 'PRIVATE_ROUTES=%s\nVPN_CLIENT_NETWORKS=%s\nSERVICE_CLIENT_NETWORKS=%s\n' "$PRIVATE_ROUTES" "$VPN_CLIENT_NETWORKS" "$SERVICE_CLIENT_NETWORKS"
   printf 'DNS=%s SOCKS=%s\n' "$ENABLE_DNS" "$ENABLE_SOCKS"

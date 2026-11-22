@@ -69,6 +69,19 @@ sudo bash ./install.sh
 
 Основной менеджер устанавливается как команда `awgproxy`.
 
+### Автоматический LAN-адрес
+
+В мастере выберите **Detect LAN IPv4 automatically at startup?**, чтобы AWG
+Proxy использовал текущий основной IPv4 выбранного LAN-интерфейса. При загрузке
+он обновляет привязки DNS, SOCKS5 и nftables перед запуском служб. Интерфейс,
+подсеть и адрес LAN-шлюза задаются отдельно. Если на интерфейсе нет одного
+однозначного основного IPv4, проверьте настройки сети или выберите ручной режим.
+
+Для существующей установки режим включается через `sudo awgproxy change lan`.
+При смене адреса без перезагрузки примените новые привязки командой
+`sudo awgproxy restart`. Клиенты со старым IP в настройках должны использовать
+новый адрес сервера.
+
 ## Управление
 
 ```text
@@ -78,7 +91,11 @@ awgproxy check           полный readiness-check
 awgproxy stats           AWG и nftables-счётчики
 awgproxy report          сохранить диагностический отчёт без секретов
 awgproxy config          настройки без секретов
-awgproxy change          повторный мастер конфигурации
+awgproxy change          меню настроек
+awgproxy change lan      интерфейс, IPv4, подсеть и LAN-шлюз
+awgproxy change awg      конфигурация туннеля, MTU и MSS
+awgproxy change networks  сети доступа и частные маршруты
+awgproxy change services  DNS и SOCKS5
 awgproxy restart         перезапуск управляемых сервисов
 awgproxy diagnose        read-only диагностика
 awgproxy backup          резервная копия конфигурации и сетевого состояния
