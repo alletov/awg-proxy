@@ -34,6 +34,8 @@ install -d -m 0755 "$INSTALL_DIR" "$INSTALL_DIR/lib"
 install -m 0755 "$source_dir/awgproxy.sh" "$INSTALL_DIR/awgproxy.sh"
 install -m 0644 "$source_dir"/lib/*.sh "$INSTALL_DIR/lib/"
 install -m 0644 "$source_dir/version" "$INSTALL_DIR/version"
+printf '%s\n' "$REPO" "$BRANCH" > "$tmp_dir/update-source"
+install -m 0644 "$tmp_dir/update-source" "$INSTALL_DIR/update-source"
 ln -sfn "$INSTALL_DIR/awgproxy.sh" /usr/local/sbin/awgproxy
 
 printf 'AWG Proxy installed. Starting the setup wizard...\n'

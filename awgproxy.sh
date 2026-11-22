@@ -8,7 +8,7 @@ while [[ -L $SCRIPT_PATH ]]; do
   [[ $SCRIPT_PATH == /* ]] || SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
 done
 SCRIPT_DIR=$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)
-for module in common detect config render actions; do
+for module in common detect config render actions update; do
   # shellcheck disable=SC1090
   source "$SCRIPT_DIR/lib/$module.sh"
 done
@@ -32,6 +32,7 @@ Usage: awgproxy [command]
   diagnose      collect read-only diagnostics
   restart       restart managed services
   backup        create a configuration/routing backup
+  update        update installed scripts from GitHub
   reboot        safely request a server reboot
   version       print version
 EOF
@@ -50,12 +51,38 @@ initial_install() {
   apply_configuration
 }
 
+show_configuration_summary() {
+  if [[ ! -r $AWGPROXY_CONFIG ]]; then
+    printf 'Текущая конфигурация: не задана\n'
+    return
+  fi
+
+  load_config saved
+  local address=$LAN_IP mode='вручную' dns='выкл.' socks='выкл.'
+  if [[ $LAN_ADDRESS_MODE == auto ]]; then
+    mode='авто'
+    address=$(current_lan_ipv4 "$LAN_IF") || address='IPv4 недоступен'
+  fi
+  if (( ENABLE_DNS )); then dns='вкл.'; fi
+  if (( ENABLE_SOCKS )); then socks='вкл.'; fi
+
+  printf 'LAN:       %s · %s (%s) · подсеть %s · шлюз %s\n' \
+    "$LAN_IF" "$address" "$mode" "$LAN_PREFIX" "$LAN_GW"
+  printf 'AmneziaWG: %s · MTU %s · MSS %s\n' "$AWG_ENDPOINT_RAW" "$AWG_MTU" "$TCP_MSS"
+  printf 'Доступ к VPN: %s\n' "$VPN_CLIENT_NETWORKS"
+  printf 'Доступ к DNS и SOCKS5: %s\n' "$SERVICE_CLIENT_NETWORKS"
+  printf 'Частные маршруты: %s\n' "$PRIVATE_ROUTES"
+  printf 'DNS: %s · SOCKS5: %s\n' "$dns" "$socks"
+}
+
 change_configuration() {
   require_root
   local choice section
   while true; do
+    if [[ -t 1 ]]; then clear 2>/dev/null || true; fi
     printf '\nНастройки AWG Proxy\n\n'
-    printf '  1) Настройки LAN\n  2) Настройки AmneziaWG\n  3) Сети доступа и маршруты\n'
+    show_configuration_summary
+    printf '\n  1) Настройки LAN\n  2) Настройки AmneziaWG\n  3) Сети доступа и маршруты\n'
     printf '  4) DNS и SOCKS5\n  0) Назад\n\n'
     read -r -p 'Выбор [0]: ' choice || return 0
     case ${choice:-0} in
@@ -64,7 +91,7 @@ change_configuration() {
       3) section=networks ;;
       4) section=services ;;
       0) return 0 ;;
-      *) warn "unknown choice"; continue ;;
+      *) warn "unknown choice"; pause; continue ;;
     esac
     "$BASH" "$SCRIPT_DIR/awgproxy.sh" change "$section" || true
     pause
@@ -98,9 +125,32 @@ safe_reboot() {
   systemctl reboot
 }
 
+backup_and_update_menu() {
+  require_root
+  local choice
+  while true; do
+    if [[ -t 1 ]]; then clear 2>/dev/null || true; fi
+    printf '\nРезервные копии и обновление\n\n'
+    printf '  1) Создать резервную копию\n  2) Обновить с GitHub\n  0) Назад\n\n'
+    read -r -p 'Выбор [0]: ' choice || return 0
+    case ${choice:-0} in
+      1) "$BASH" "$SCRIPT_DIR/awgproxy.sh" backup || true ;;
+      2)
+        if "$BASH" "$SCRIPT_DIR/awgproxy.sh" update; then
+          pause
+          exec "$BASH" "$SCRIPT_DIR/awgproxy.sh" menu
+        fi
+        ;;
+      0) return 0 ;;
+      *) warn "unknown choice" ;;
+    esac
+    pause
+  done
+}
+
 menu() {
   while true; do
-    clear 2>/dev/null || true
+    if [[ -t 1 ]]; then clear 2>/dev/null || true; fi
     if [[ -r $AWGPROXY_CONFIG ]]; then
       show_status
     else
@@ -112,7 +162,7 @@ menu() {
       fi
     fi
     printf '\n  1) Run checks\n  2) Statistics\n  3) Show configuration\n'
-    printf '  4) Change configuration\n  5) Restart services\n  6) Diagnostics\n  7) Create backup\n'
+    printf '  4) Change configuration\n  5) Restart services\n  6) Diagnostics\n  7) Backup and update\n'
     printf '  8) Save support report\n  9) Reboot server\n  0) Exit\n\n'
     read -r -p 'Select [0]: ' choice || return 0
     case ${choice:-0} in
@@ -122,7 +172,7 @@ menu() {
       4) change_configuration ;;
       5) restart_services; pause ;;
       6) show_readonly_diagnostics; pause ;;
-      7) printf 'Backup: %s\n' "$(create_backup)"; pause ;;
+      7) backup_and_update_menu ;;
       8) collect_report; pause ;;
       9) safe_reboot; return ;;
       0) return ;;
@@ -144,7 +194,8 @@ case ${1:-menu} in
   report) collect_report ;;
   diagnose) show_readonly_diagnostics ;;
   restart) restart_services ;;
-  backup) require_root; create_backup; printf '\n' ;;
+  backup) require_root; backup=$(create_backup); printf 'Backup: %s\n' "$backup" ;;
+  update) update_project ;;
   reboot) safe_reboot ;;
   version|--version|-v) printf '%s\n' "$VERSION" ;;
   help|--help|-h) usage ;;
