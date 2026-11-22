@@ -88,6 +88,32 @@ handshake_age() {
   now=$(date +%s); printf '%s' "$((now-latest))"
 }
 
+lan_gateway_is_on_link() {
+  ip -4 route get "$LAN_GW" from "$LAN_IP" 2>/dev/null |
+    awk -v iface="$LAN_IF" '
+      NR == 1 {
+        for (i = 1; i < NF; i++) {
+          if ($i == "dev" && $(i+1) == iface) correct_device = 1
+          if ($i == "via") next_hop = 1
+        }
+      }
+      END { exit !(correct_device && !next_hop) }
+    '
+}
+
+wait_for_socks_listener() {
+  local attempt sockets
+  for ((attempt=0; attempt<10; attempt++)); do
+    if service_active danted &&
+       sockets=$(ss -H -4 -lnt 'sport = :1080') &&
+       awk -v address="$LAN_IP:1080" '$4 == address { found = 1 } END { exit !found }' <<< "$sockets"; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 validate_installation() {
   load_config
   local failures=0 age route internet_route egress
@@ -95,7 +121,7 @@ validate_installation() {
   age=$(handshake_age) && [[ $age -le 180 ]] && ok "AWG handshake age: ${age}s" || { warn "AWG handshake is missing or stale"; failures=$((failures+1)); }
   route=$(ip -4 route get "$AWG_ENDPOINT_IP" 2>/dev/null || true)
   [[ $route == *"via $LAN_GW"* && $route == *"dev $LAN_IF"* ]] && ok "endpoint route is protected" || { warn "incorrect endpoint route: $route"; failures=$((failures+1)); }
-  ip -4 route get "$LAN_IP" | grep -q "dev $LAN_IF" && ok "LAN remains reachable" || { warn "LAN route check failed"; failures=$((failures+1)); }
+  lan_gateway_is_on_link && ok "LAN gateway is on-link via $LAN_IF" || { warn "LAN gateway $LAN_GW has no direct route via $LAN_IF"; failures=$((failures+1)); }
   internet_route=$(ip -4 route get 1.1.1.1 2>/dev/null || true)
   [[ $internet_route == *"dev awg0"* ]] && ok "server Internet route uses awg0" || { warn "server Internet route does not use awg0: $internet_route"; failures=$((failures+1)); }
   [[ $(cat /proc/sys/net/ipv4/ip_forward) == 1 ]] && ok "IPv4 forwarding is enabled" || { warn "IPv4 forwarding is disabled"; failures=$((failures+1)); }
@@ -108,7 +134,12 @@ validate_installation() {
     if service_active unbound && ss -lnut | grep -qE "${LAN_IP//./\\.}:53[[:space:]]"; then ok "DNS is listening on the LAN address"; else warn "DNS validation failed"; failures=$((failures+1)); fi
   fi
   if (( ENABLE_SOCKS )); then
-    if service_active danted && ss -lnt | grep -qE "${LAN_IP//./\\.}:1080[[:space:]]"; then ok "SOCKS is listening on the LAN address"; else warn "SOCKS validation failed"; failures=$((failures+1)); fi
+    if wait_for_socks_listener; then
+      ok "SOCKS is listening on $LAN_IP:1080"
+    else
+      warn "Dante is $(systemctl is-active danted || true), or has no listener on $LAN_IP:1080. See journalctl -u danted."
+      failures=$((failures+1))
+    fi
   fi
   (( failures == 0 ))
 }
