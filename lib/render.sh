@@ -18,6 +18,7 @@ render_lan_bindings_script() {
 #!/usr/bin/env bash
 set -Eeuo pipefail
 source /opt/awgproxy/lib/common.sh
+source /opt/awgproxy/lib/geoip.sh
 source /opt/awgproxy/lib/render.sh
 load_config saved
 [[ ${LAN_ADDRESS_MODE:-static} == auto ]] || exit 0
@@ -40,7 +41,9 @@ render_routes_script() {
   cat > /usr/local/lib/awgproxy/routes.sh <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
-source /etc/awgproxy/awgproxy.conf
+source /opt/awgproxy/lib/common.sh
+source /opt/awgproxy/lib/geoip.sh
+load_config saved
 metric=50
 route_proto=186
 case "${1:-up}" in
@@ -58,8 +61,10 @@ case "${1:-up}" in
     for route in "${routes[@]}"; do
       ip -4 route replace "$route" via "$LAN_GW" dev "$LAN_IF" proto "$route_proto" metric "$metric"
     done
+    geoip_routes_up
     ;;
   down)
+    geoip_routes_down
     ip -4 route flush proto "$route_proto"
     ;;
   *) echo "Usage: $0 {up|down}" >&2; exit 2 ;;
@@ -70,12 +75,27 @@ EOF
 
 render_firewall() {
   local vpn_nft service_nft
+  local geoip_set='' geoip_forward='' geoip_nat='' geoip_output='' cache prefixes
   vpn_nft=$(csv_to_nft "$VPN_CLIENT_NETWORKS")
   service_nft=$(csv_to_nft "$SERVICE_CLIENT_NETWORKS")
+  if [[ -n ${GEOIP_COUNTRIES:-} ]]; then
+    cache=$(geoip_cache) || return 1
+    prefixes=$(paste -sd, "$cache") || return 1
+    geoip_set="set geoip_lan { type ipv4_addr; flags interval; elements = { $prefixes } }"
+    geoip_forward="iifname \"$LAN_IF\" oifname \"$LAN_IF\" ip daddr @geoip_lan ip saddr @vpn_clients counter accept
+    iifname \"$LAN_IF\" oifname \"$LAN_IF\" ip daddr @geoip_lan counter drop"
+    geoip_nat="iifname \"$LAN_IF\" oifname \"$LAN_IF\" ip daddr @geoip_lan ip saddr @vpn_clients counter masquerade"
+    geoip_output="chain geoip_output {
+    type filter hook output priority filter; policy accept;
+    oifname \"$LAN_IF\" icmp type redirect drop
+  }"
+  fi
   cat > "$AWGPROXY_DIR/nftables.conf" <<EOF
 table inet awgproxy_filter {
   set vpn_clients { type ipv4_addr; flags interval; elements = { $vpn_nft } }
   set service_clients { type ipv4_addr; flags interval; elements = { $service_nft } }
+  $geoip_set
+  $geoip_output
 
   chain input {
     type filter hook input priority filter; policy accept;
@@ -89,6 +109,7 @@ table inet awgproxy_filter {
   chain forward {
     type filter hook forward priority filter; policy accept;
     ct state established,related counter accept
+    $geoip_forward
     iifname "$LAN_IF" oifname "awg0" ip saddr @vpn_clients counter accept
     iifname "$LAN_IF" oifname "awg0" counter drop
     iifname "awg0" oifname "$LAN_IF" counter drop
@@ -103,9 +124,11 @@ table inet awgproxy_filter {
 
 table ip awgproxy_nat {
   set vpn_clients { type ipv4_addr; flags interval; elements = { $vpn_nft } }
+  $geoip_set
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
     oifname "awg0" ip saddr @vpn_clients counter masquerade
+    $geoip_nat
   }
 }
 EOF
@@ -114,10 +137,14 @@ EOF
 #!/usr/bin/env bash
 set -Eeuo pipefail
 config=/etc/awgproxy/nftables.conf
-nft -c -f "$config"
-nft list table inet awgproxy_filter >/dev/null 2>&1 && nft delete table inet awgproxy_filter
-nft list table ip awgproxy_nat >/dev/null 2>&1 && nft delete table ip awgproxy_nat
-nft -f "$config"
+batch=$(mktemp)
+trap 'rm -f -- "$batch"' EXIT
+{
+  if nft list table inet awgproxy_filter >/dev/null 2>&1; then echo 'delete table inet awgproxy_filter'; fi
+  if nft list table ip awgproxy_nat >/dev/null 2>&1; then echo 'delete table ip awgproxy_nat'; fi
+  cat "$config"
+} > "$batch"
+if [[ ${1:-} == check ]]; then nft -c -f "$batch"; else nft -f "$batch"; fi
 EOF
   chmod 0755 /usr/local/lib/awgproxy/firewall-apply.sh
 }
@@ -187,6 +214,19 @@ set -Eeuo pipefail
 backup=${1:?backup directory required}
 [[ -e "$backup/ARMED" ]] || exit 0
 logger -t awgproxy "automatic network rollback started"
+if [[ ${2:-all} == geoip ]]; then
+  source /opt/awgproxy/lib/common.sh
+  source /opt/awgproxy/lib/geoip.sh
+  source /opt/awgproxy/lib/render.sh
+  cp -a "$backup/awgproxy.conf" "$AWGPROXY_CONFIG"
+  load_config
+  geoip_routes_down
+  render_firewall
+  /usr/local/lib/awgproxy/firewall-apply.sh
+  geoip_routes_up
+  logger -t awgproxy "GeoIP rollback completed"
+  exit 0
+fi
 systemctl stop awg-quick@awg0.service 2>/dev/null || true
 if [[ -s "$backup/nftables.rules" ]]; then
   nft flush ruleset
@@ -217,7 +257,7 @@ EOF
 [Unit]
 Description=AWG Proxy protected routes
 Before=awg-quick@awg0.service
-After=network-online.target
+After=network-online.target awgproxy-firewall.service
 Wants=network-online.target
 
 [Service]

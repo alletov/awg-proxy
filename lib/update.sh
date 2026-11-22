@@ -69,7 +69,7 @@ update_project() (
     fi
     if ! cmp -s "$work/new/$file" "$SCRIPT_DIR/$file"; then changed+=("$file"); fi
   done
-  for file in common detect config render actions update; do
+  for file in common detect geoip config render actions update; do
     [[ -f $work/new/lib/$file.sh ]] || die "incomplete archive: lib/$file.sh"
   done
   target_version=$(<"$work/new/version")

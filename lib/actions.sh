@@ -36,12 +36,12 @@ create_backup() {
 }
 
 arm_rollback() {
-  local backup=$1 unit
+  local backup=$1 section=${2:-all} unit
   touch "$backup/ARMED"
   unit="awgproxy-rollback-$(date +%s)"
   printf '%s' "$unit" > "$backup/ROLLBACK_UNIT"
   systemd-run --unit="$unit" --on-active=5m \
-    /usr/local/lib/awgproxy/rollback.sh "$backup" >/dev/null
+    /usr/local/lib/awgproxy/rollback.sh "$backup" "$section" >/dev/null
   info "automatic rollback armed for 5 minutes"
 }
 
@@ -58,9 +58,9 @@ apply_configuration() {
   local backup=${1:-} section=${2:-all}
   [[ -n $backup ]] || backup=$(create_backup)
   render_runtime_files
-  nft -c -f "$AWGPROXY_DIR/nftables.conf"
+  /usr/local/lib/awgproxy/firewall-apply.sh check
   systemctl daemon-reload
-  arm_rollback "$backup"
+  if [[ $section != geoip ]]; then arm_rollback "$backup" "$section"; fi
   case $section in
     all|lan|awg)
       sysctl --system >/dev/null
@@ -71,10 +71,17 @@ apply_configuration() {
       systemctl start awg-quick@awg0
       ;;
     networks) systemctl restart awgproxy-routes awgproxy-firewall ;;
+    geoip)
+      geoip_routes_down
+      /usr/local/lib/awgproxy/firewall-apply.sh
+      geoip_routes_up
+      ;;
     services) ;;
   esac
-  if (( ENABLE_DNS )); then systemctl enable unbound; systemctl restart unbound; else systemctl disable --now unbound 2>/dev/null || true; fi
-  if (( ENABLE_SOCKS )); then systemctl enable danted; systemctl restart danted; else systemctl disable --now danted 2>/dev/null || true; fi
+  if [[ $section != geoip ]]; then
+    if (( ENABLE_DNS )); then systemctl enable unbound; systemctl restart unbound; else systemctl disable --now unbound 2>/dev/null || true; fi
+    if (( ENABLE_SOCKS )); then systemctl enable danted; systemctl restart danted; else systemctl disable --now danted 2>/dev/null || true; fi
+  fi
   if validate_installation; then
     if [[ -n ${SSH_CONNECTION:-} ]] && ! confirm "Have you opened and verified a second SSH session?"; then
       warn "rollback remains armed until a second SSH session is confirmed"
@@ -127,14 +134,26 @@ wait_for_socks_listener() {
 
 validate_installation() {
   load_config
-  local failures=0 age route internet_route
+  local failures=0 age route
   service_active awg-quick@awg0 && ok "awg0 service is active" || { warn "awg0 service is inactive"; failures=$((failures+1)); }
   age=$(handshake_age) && [[ $age -le 180 ]] && ok "AWG handshake age: ${age}s" || { warn "AWG handshake is missing or stale"; failures=$((failures+1)); }
   route=$(ip -4 route get "$AWG_ENDPOINT_IP" 2>/dev/null || true)
   [[ $route == *"via $LAN_GW"* && $route == *"dev $LAN_IF"* ]] && ok "endpoint route is protected" || { warn "incorrect endpoint route: $route"; failures=$((failures+1)); }
   lan_gateway_is_on_link && ok "LAN gateway is on-link via $LAN_IF" || { warn "LAN gateway $LAN_GW has no direct route via $LAN_IF"; failures=$((failures+1)); }
-  internet_route=$(ip -4 route get 1.1.1.1 2>/dev/null || true)
-  [[ $internet_route == *"dev awg0"* ]] && ok "server Internet route uses awg0" || { warn "server Internet route does not use awg0: $internet_route"; failures=$((failures+1)); }
+  if tunnel_default_is_available; then
+    ok "server Internet route uses awg0 outside GeoIP exceptions"
+  else
+    warn "server Internet route does not use awg0 outside GeoIP exceptions"
+    failures=$((failures+1))
+  fi
+  if [[ -n $GEOIP_COUNTRIES ]]; then
+    if geoip_routes_are_active; then
+      ok "GeoIP $GEOIP_COUNTRIES: IPv4 routes via $LAN_GW and firewall sets are active"
+    else
+      warn "GeoIP $GEOIP_COUNTRIES: routing or firewall rules are incomplete"
+      failures=$((failures+1))
+    fi
+  fi
   [[ $(cat /proc/sys/net/ipv4/ip_forward) == 1 ]] && ok "IPv4 forwarding is enabled" || { warn "IPv4 forwarding is disabled"; failures=$((failures+1)); }
   nft list table inet awgproxy_filter >/dev/null 2>&1 && nft list table ip awgproxy_nat >/dev/null 2>&1 && ok "nftables policy is loaded" || { warn "nftables policy missing"; failures=$((failures+1)); }
   if (( ENABLE_DNS )); then
@@ -247,6 +266,7 @@ print_config_redacted() {
   printf 'LAN_ADDRESS_MODE=%s\n' "${LAN_ADDRESS_MODE:-static}"
   printf 'AWG_ENDPOINT=%s\nAWG_MTU=%s\nTCP_MSS=%s\n' "$AWG_ENDPOINT_RAW" "$AWG_MTU" "$TCP_MSS"
   printf 'PRIVATE_ROUTES=%s\nVPN_CLIENT_NETWORKS=%s\nSERVICE_CLIENT_NETWORKS=%s\n' "$PRIVATE_ROUTES" "$VPN_CLIENT_NETWORKS" "$SERVICE_CLIENT_NETWORKS"
+  printf 'GEOIP_COUNTRIES=%s\n' "$GEOIP_COUNTRIES"
   printf 'DNS=%s SOCKS=%s\n' "$ENABLE_DNS" "$ENABLE_SOCKS"
   printf 'Tunnel secrets: [REDACTED]\n'
 }

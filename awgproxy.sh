@@ -8,7 +8,7 @@ while [[ -L $SCRIPT_PATH ]]; do
   [[ $SCRIPT_PATH == /* ]] || SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
 done
 SCRIPT_DIR=$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)
-for module in common detect config render actions update; do
+for module in common detect geoip config render actions update; do
   # shellcheck disable=SC1090
   source "$SCRIPT_DIR/lib/$module.sh"
 done
@@ -23,7 +23,7 @@ Usage: awgproxy [command]
   menu          interactive management menu (default)
   install       initial setup or open configuration menu
   config        show redacted effective configuration
-  change [lan|awg|networks|services]
+  change [lan|awg|networks|services|geoip]
                 open configuration menu or edit one section
   status        services, tunnel, routes and listeners
   check         run readiness and safety checks
@@ -72,6 +72,7 @@ show_configuration_summary() {
   printf 'Доступ к VPN: %s\n' "$VPN_CLIENT_NETWORKS"
   printf 'Доступ к DNS и SOCKS5: %s\n' "$SERVICE_CLIENT_NETWORKS"
   printf 'Частные маршруты: %s\n' "$PRIVATE_ROUTES"
+  printf 'GeoIP через LAN: %s\n' "${GEOIP_COUNTRIES:-выкл.}"
   printf 'DNS: %s · SOCKS5: %s\n' "$dns" "$socks"
 }
 
@@ -83,13 +84,14 @@ change_configuration() {
     printf '\nНастройки AWG Proxy\n\n'
     show_configuration_summary
     printf '\n  1) Настройки LAN\n  2) Настройки AmneziaWG\n  3) Сети доступа и маршруты\n'
-    printf '  4) DNS и SOCKS5\n  0) Назад\n\n'
+    printf '  4) DNS и SOCKS5\n  5) GeoIP через LAN\n  0) Назад\n\n'
     read -r -p 'Выбор [0]: ' choice || return 0
     case ${choice:-0} in
       1) section=lan ;;
       2) section=awg ;;
       3) section=networks ;;
       4) section=services ;;
+      5) section=geoip ;;
       0) return 0 ;;
       *) warn "unknown choice"; pause; continue ;;
     esac
@@ -102,7 +104,7 @@ change_configuration_section() {
   require_root
   local section=$1 backup
   case $section in
-    lan|awg|networks|services) ;;
+    lan|awg|networks|services|geoip) ;;
     *) die "unknown configuration section: $section" ;;
   esac
   load_config saved
@@ -110,8 +112,13 @@ change_configuration_section() {
     info "configuration unchanged"
     return 0
   fi
+  if [[ $section == geoip ]]; then GEOIP_DATA=$(geoip_download); fi
   backup=$(create_backup)
   info "pre-change backup: $backup"
+  if [[ $section == geoip ]]; then
+    render_rollback_script
+    arm_rollback "$backup" "$section"
+  fi
   save_nonsecret_config
   if [[ $section == awg ]]; then prepare_awg_config "$AWG_SOURCE_CONFIG"; fi
   apply_configuration "$backup" "$section"

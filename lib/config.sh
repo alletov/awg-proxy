@@ -21,6 +21,12 @@ configure_wizard() {
   if [[ $section == all || $section == networks ]]; then prompt_network_settings; fi
   if [[ $section == all || $section == awg ]]; then prompt_awg_settings "$section"; fi
   if [[ $section == all || $section == services ]]; then prompt_service_settings; fi
+  if [[ $section == geoip ]]; then
+    local countries
+    countries=$(prompt_default "Страны через LAN (например RU,KZ; '-' выключает GeoIP)" "${GEOIP_COUNTRIES:-}") ||
+      die "input ended"
+    GEOIP_COUNTRIES=$(normalize_geoip_countries "$countries") || die "invalid GeoIP country codes"
+  fi
 
   printf '\nPlanned configuration:\n'
   if [[ $section == all || $section == lan ]]; then
@@ -36,6 +42,9 @@ configure_wizard() {
   fi
   if [[ $section == all || $section == services ]]; then
     printf '  Services on %s: DNS=%s, SOCKS=%s\n' "$LAN_IP" "$ENABLE_DNS" "$ENABLE_SOCKS"
+  fi
+  if [[ $section == geoip ]]; then
+    printf '  GeoIP via %s: %s\n' "$LAN_GW" "${GEOIP_COUNTRIES:-disabled}"
   fi
   if [[ $section != services ]]; then
     warn "Changing routing or firewall can interrupt SSH. Console or out-of-band access is strongly recommended."
@@ -140,6 +149,7 @@ save_nonsecret_config() {
     printf 'PRIVATE_ROUTES=%q\n' "$PRIVATE_ROUTES"; printf 'VPN_CLIENT_NETWORKS=%q\n' "$VPN_CLIENT_NETWORKS"
     printf 'SERVICE_CLIENT_NETWORKS=%q\n' "$SERVICE_CLIENT_NETWORKS"
     printf 'ENABLE_DNS=%q\n' "$ENABLE_DNS"; printf 'ENABLE_SOCKS=%q\n' "$ENABLE_SOCKS"
+    printf 'GEOIP_COUNTRIES=%q\nGEOIP_DATA=%q\n' "${GEOIP_COUNTRIES:-}" "${GEOIP_DATA:-}"
   } > "$tmp"
   atomic_install "$tmp" "$AWGPROXY_CONFIG" 0600
   rm -f -- "$tmp"
