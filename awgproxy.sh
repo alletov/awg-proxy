@@ -162,7 +162,7 @@ menu() {
       fi
     fi
     printf '\n  1) Run checks\n  2) Statistics\n  3) Show configuration\n'
-    printf '  4) Change configuration\n  5) Restart services\n  6) Diagnostics\n  7) Backup and update\n'
+    printf '  4) Change configuration\n  5) Restart services\n  6) Diagnostics\n  7) Update and Backup\n'
     printf '  8) Save support report\n  9) Reboot server\n  0) Exit\n\n'
     read -r -p 'Select [0]: ' choice || return 0
     case ${choice:-0} in
