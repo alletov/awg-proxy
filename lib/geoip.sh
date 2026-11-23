@@ -2,6 +2,8 @@
 
 readonly GEOIP_ROUTE_PROTO=242
 readonly GEOIP_ROUTE_STATE=/run/awgproxy-geoip.routes
+readonly GEOIP_TUNNEL_RULE_PRIORITY=10500
+readonly GEOIP_TUNNEL_RULE_STATE=/run/awgproxy-geoip-tunnel.rules
 
 normalize_geoip_countries() {
   local countries=${1//[[:space:]]/}
@@ -99,14 +101,66 @@ geoip_routes_up() {
   fi
 }
 
+geoip_tunnel_addresses() {
+  ip -o -4 addr show dev awg0 scope global |
+    awk '{ split($4, address, "/"); print address[1] }'
+}
+
+geoip_tunnel_policy_down() {
+  [[ -f $GEOIP_TUNNEL_RULE_STATE ]] || return 0
+  local address table
+  while read -r address table; do
+    ip -4 rule del priority "$GEOIP_TUNNEL_RULE_PRIORITY" iif lo from "$address/32" table "$table" ||
+      return 1
+  done < "$GEOIP_TUNNEL_RULE_STATE"
+  rm -f -- "$GEOIP_TUNNEL_RULE_STATE"
+}
+
+geoip_tunnel_policy_up() {
+  geoip_tunnel_policy_down || return 1
+  [[ -n ${GEOIP_COUNTRIES:-} && ${ENABLE_SOCKS:-0} == 1 &&
+     ${SOCKS_ROUTING_MODE:-tunnel} == tunnel ]] || return 0
+  local table addresses address existing
+  table=$(ip -4 -N -o route show table all default dev awg0 | awk '
+    $1 == "default" {
+      id = 254
+      for (i = 2; i < NF; i++) if ($i == "table") id = $(i + 1)
+      print id
+    }
+  ' | sort -u) || return 1
+  [[ $table =~ ^[0-9]+$ && $table != 254 ]] ||
+    die "cannot identify a separate IPv4 routing table for awg0"
+  addresses=$(geoip_tunnel_addresses) || return 1
+  [[ -n $addresses ]] || die "awg0 has no IPv4 address for SOCKS5"
+  existing=$(ip -4 rule show pref "$GEOIP_TUNNEL_RULE_PRIORITY") || return 1
+  [[ -z $existing ]] || die "routing rule priority $GEOIP_TUNNEL_RULE_PRIORITY is already in use"
+
+  (umask 077; : > "$GEOIP_TUNNEL_RULE_STATE") || return 1
+  while IFS= read -r address; do
+    if ! ip -4 rule add priority "$GEOIP_TUNNEL_RULE_PRIORITY" iif lo from "$address/32" table "$table"; then
+      geoip_tunnel_policy_down
+      return 1
+    fi
+    printf '%s %s\n' "$address" "$table" >> "$GEOIP_TUNNEL_RULE_STATE"
+  done <<< "$addresses"
+}
+
 geoip_routes_are_active() {
-  local cache ip route installed
+  local cache ip route installed address addresses
   cache=$(geoip_cache) || return 1
   installed=$(ip -4 route show table main proto "$GEOIP_ROUTE_PROTO") || return 1
   [[ $(wc -l <<< "$installed") -eq $(wc -l < "$cache") && -n $installed ]] || return 1
   IFS=/ read -r ip _ < "$cache" || return 1
   route=$(ip -4 route get "$ip" 2>/dev/null) || return 1
   [[ " $route " == *" via $LAN_GW dev $LAN_IF "* ]] || return 1
+  if (( ENABLE_SOCKS )) && [[ ${SOCKS_ROUTING_MODE:-tunnel} == tunnel ]]; then
+    addresses=$(geoip_tunnel_addresses) || return 1
+    [[ -n $addresses ]] || return 1
+    while IFS= read -r address; do
+      route=$(ip -4 route get "$ip" from "$address" 2>/dev/null) || return 1
+      [[ " $route " == *" dev awg0 "* ]] || return 1
+    done <<< "$addresses"
+  fi
   nft list set inet awgproxy_filter geoip_lan >/dev/null 2>&1 &&
     nft list set ip awgproxy_nat geoip_lan >/dev/null 2>&1
 }

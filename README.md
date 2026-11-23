@@ -47,19 +47,11 @@ AWG Proxy создаёт только собственные nftables-табли
 Установите проект одной командой:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/alletov/awg-proxy/main/install.sh \
-  -o /tmp/awgproxy-install.sh
-sudo bash /tmp/awgproxy-install.sh
+( awg_tmp=$(mktemp -d) && trap 'rm -f -- "$awg_tmp/install.sh"; rmdir -- "$awg_tmp"' EXIT && curl -fsSL -o "$awg_tmp/install.sh" https://raw.githubusercontent.com/alletov/awg-proxy/main/install.sh && sudo bash "$awg_tmp/install.sh" )
 ```
 
-Вариант без изменения `install.sh`:
-
-```bash
-sudo AWGPROXY_REPO=alletov/awg-proxy bash /tmp/awgproxy-install.sh
-```
-
-Скачивание в отдельный файл сделано намеренно: пользователь может проверить
-скрипт до запуска от root. Конструкция `curl | sudo bash` не рекомендуется.
+Установщик запускается после успешного скачивания. Временный файл удаляется,
+когда мастер установки завершает работу.
 
 Для локальной разработки:
 
@@ -96,7 +88,8 @@ awgproxy change lan      интерфейс, IPv4, подсеть и LAN-шлю�
 awgproxy change awg      конфигурация туннеля, MTU и MSS
 awgproxy change networks  сети доступа и частные маршруты
 awgproxy change geoip     страны, к которым применяется LAN-маршрутизация
-awgproxy change services  DNS и SOCKS5
+awgproxy change dns      включение или отключение DNS
+awgproxy change socks    включение, отключение и режим маршрутизации SOCKS5
 awgproxy restart         перезапуск управляемых сервисов
 awgproxy diagnose        read-only диагностика
 awgproxy backup          резервная копия конфигурации и сетевого состояния
@@ -130,7 +123,7 @@ Unbound, Dante, заголовки текущего ядра и необходи
 
 ## Раздельная маршрутизация GeoIP
 
-Откройте **4) Change configuration → 5) GeoIP через LAN** или выполните
+Откройте **4) Change configuration → 6) GeoIP через LAN** или выполните
 `sudo awgproxy change geoip`. Введите `RU` или список стран через запятую,
 например `RU,KZ`, и подтвердите план. Enter оставляет текущий список, а
 `-` отключает GeoIP. Чтобы обновить базу, снова подтвердите текущий список.
@@ -138,13 +131,20 @@ Unbound, Dante, заголовки текущего ядра и необходи
 AWG Proxy загружает агрегированные IPv4-диапазоны из [IPdeny](https://www.ipdeny.com/ipblocks/).
 Маршруты для этих диапазонов идут через настроенный LAN-шлюз для самого сервера
 и разрешённых клиентов шлюза. Остальные интернет-направления используют
-AmneziaWG. Фильтрация выполняется по IP назначения. На SOCKS5, который привязан
-к `awg0`, этот режим не рассчитан. IPv6 в GeoIP не участвует.
+AmneziaWG. Фильтрация выполняется по IP назначения. IPv6 в GeoIP не участвует.
+
+В разделе **4) Change configuration → 5) Настройки SOCKS5** либо через
+`sudo awgproxy change socks` можно выбрать режим SOCKS5. **Только через
+AWG** сохраняет выход через туннель и используется по умолчанию. **По
+маршрутам сервера** отправляет запросы SOCKS5 к выбранным в GeoIP странам через
+LAN-шлюз, а остальные интернет-запросы через AmneziaWG.
 
 Проверенная копия диапазонов хранится локально и используется при перезагрузке
 без повторного скачивания. В Linux-таблице `main` для этих маршрутов
-зарезервирован протокол `242`. Команда `sudo awgproxy check` проверяет, что
-маршруты и наборы адресов firewall загружены.
+зарезервирован протокол `242`. Для сохранения выхода SOCKS5 через туннель
+в режиме «Только через AWG» используется приоритет IPv4-правила `10500`.
+Команда `sudo awgproxy check` проверяет GeoIP-маршруты, наборы адресов firewall
+и отдельное правило SOCKS5, когда выбран режим «Только через AWG».
 
 ## Модель маршрутизации
 

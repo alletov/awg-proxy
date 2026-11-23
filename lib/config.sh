@@ -20,7 +20,8 @@ configure_wizard() {
   fi
   if [[ $section == all || $section == networks ]]; then prompt_network_settings; fi
   if [[ $section == all || $section == awg ]]; then prompt_awg_settings "$section"; fi
-  if [[ $section == all || $section == services ]]; then prompt_service_settings; fi
+  case $section in all|dns|services) prompt_dns_settings ;; esac
+  case $section in all|socks|services) prompt_socks_settings ;; esac
   if [[ $section == geoip ]]; then
     local countries
     countries=$(prompt_default "Страны через LAN (например RU,KZ; '-' выключает GeoIP)" "${GEOIP_COUNTRIES:-}") ||
@@ -40,15 +41,26 @@ configure_wizard() {
     printf '  VPN clients:     %s\n  DNS/SOCKS clients: %s\n  Private routes:  %s\n' \
       "$VPN_CLIENT_NETWORKS" "$SERVICE_CLIENT_NETWORKS" "$PRIVATE_ROUTES"
   fi
-  if [[ $section == all || $section == services ]]; then
-    printf '  Services on %s: DNS=%s, SOCKS=%s\n' "$LAN_IP" "$ENABLE_DNS" "$ENABLE_SOCKS"
-  fi
+  case $section in
+    all|dns|services) printf '  DNS on %s:53: %s\n' "$LAN_IP" "$ENABLE_DNS" ;;
+  esac
+  case $section in
+    all|socks|services)
+      if (( ENABLE_SOCKS )); then
+        printf '  SOCKS5 on %s:1080: %s\n' "$LAN_IP" "$(socks_routing_label)"
+      else
+        printf '  SOCKS5: выкл.\n'
+      fi
+      ;;
+  esac
   if [[ $section == geoip ]]; then
     printf '  GeoIP via %s: %s\n' "$LAN_GW" "${GEOIP_COUNTRIES:-disabled}"
   fi
-  if [[ $section != services ]]; then
-    warn "Changing routing or firewall can interrupt SSH. Console or out-of-band access is strongly recommended."
-  fi
+  case $section in
+    all|lan|awg|networks|geoip)
+      warn "Changing routing or firewall can interrupt SSH. Console or out-of-band access is strongly recommended."
+      ;;
+  esac
   printf '  Rollback: automatic in 5 minutes until validation succeeds\n\n'
   confirm "Apply this configuration?"
 }
@@ -107,15 +119,30 @@ prompt_awg_settings() {
 
 }
 
-prompt_service_settings() {
-  local dns_default=n socks_default=n
+prompt_dns_settings() {
+  local dns_default=n
   if (( ${ENABLE_DNS:-0} )); then dns_default=y; fi
-  if (( ${ENABLE_SOCKS:-0} )); then socks_default=y; fi
-  ENABLE_DNS=1; ENABLE_SOCKS=1
+  ENABLE_DNS=1
   confirm "Enable local Unbound DNS on ${LAN_IP}:53?" "$dns_default" || ENABLE_DNS=0
-  confirm "Enable Dante SOCKS5 on ${LAN_IP}:1080?" "$socks_default" || ENABLE_SOCKS=0
   if (( ENABLE_DNS )); then check_service_port 53 unbound; fi
-  if (( ENABLE_SOCKS )); then check_service_port 1080 danted; fi
+}
+
+prompt_socks_settings() {
+  local socks_default=n routing_default=1 choice
+  if (( ${ENABLE_SOCKS:-0} )); then socks_default=y; fi
+  ENABLE_SOCKS=1
+  confirm "Enable Dante SOCKS5 on ${LAN_IP}:1080?" "$socks_default" || ENABLE_SOCKS=0
+  if (( ENABLE_SOCKS )); then
+    check_service_port 1080 danted
+    if [[ ${SOCKS_ROUTING_MODE:-tunnel} == routes ]]; then routing_default=2; fi
+    printf '\nМаршрутизация SOCKS5\n  1) Только через AWG\n  2) По маршрутам сервера (включая GeoIP)\n'
+    choice=$(prompt_default "Режим SOCKS5" "$routing_default") || die "input ended"
+    case $choice in
+      1) SOCKS_ROUTING_MODE=tunnel ;;
+      2) SOCKS_ROUTING_MODE=routes ;;
+      *) die "выберите режим SOCKS5 1 или 2" ;;
+    esac
+  fi
 }
 
 check_service_port() {
@@ -149,6 +176,7 @@ save_nonsecret_config() {
     printf 'PRIVATE_ROUTES=%q\n' "$PRIVATE_ROUTES"; printf 'VPN_CLIENT_NETWORKS=%q\n' "$VPN_CLIENT_NETWORKS"
     printf 'SERVICE_CLIENT_NETWORKS=%q\n' "$SERVICE_CLIENT_NETWORKS"
     printf 'ENABLE_DNS=%q\n' "$ENABLE_DNS"; printf 'ENABLE_SOCKS=%q\n' "$ENABLE_SOCKS"
+    printf 'SOCKS_ROUTING_MODE=%q\n' "${SOCKS_ROUTING_MODE:-tunnel}"
     printf 'GEOIP_COUNTRIES=%q\nGEOIP_DATA=%q\n' "${GEOIP_COUNTRIES:-}" "${GEOIP_DATA:-}"
   } > "$tmp"
   atomic_install "$tmp" "$AWGPROXY_CONFIG" 0600

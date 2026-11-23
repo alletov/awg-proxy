@@ -3,14 +3,80 @@
 render_runtime_files() {
   load_config
   install -d -m 0755 /usr/local/lib/awgproxy /etc/systemd/system
+  case ${1:-all} in
+    dns)
+      if (( ENABLE_DNS )); then render_dns_unit; render_unbound; fi
+      return 0
+      ;;
+    socks)
+      render_firewall
+      render_socks_routing
+      if (( ENABLE_SOCKS )); then render_dante; fi
+      return 0
+      ;;
+  esac
   render_routes_script
   render_firewall
   render_rollback_script
   render_lan_bindings_script
+  render_socks_routing
   render_systemd_units
-  (( ENABLE_DNS )) && render_unbound
+  if (( ENABLE_DNS )); then render_dns_unit; render_unbound; fi
   (( ENABLE_SOCKS )) && render_dante
   printf 'net.ipv4.ip_forward = 1\n' > /etc/sysctl.d/90-awgproxy-forwarding.conf
+}
+
+render_socks_routing() {
+  cat > /usr/local/lib/awgproxy/socks-routing.sh <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source /opt/awgproxy/lib/common.sh
+source /opt/awgproxy/lib/geoip.sh
+case "${1:-}" in
+  up) load_config saved; geoip_tunnel_policy_up ;;
+  down) geoip_tunnel_policy_down ;;
+  *) exit 2 ;;
+esac
+EOF
+  chmod 0755 /usr/local/lib/awgproxy/socks-routing.sh
+  cat > /etc/systemd/system/awgproxy-socks-routing.service <<'EOF'
+[Unit]
+Description=AWG Proxy SOCKS5 source routing
+Requires=awg-quick@awg0.service
+After=awg-quick@awg0.service
+PartOf=awg-quick@awg0.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/awgproxy/socks-routing.sh up
+ExecStop=/usr/local/lib/awgproxy/socks-routing.sh down
+RemainAfterExit=yes
+EOF
+  if (( ENABLE_SOCKS )); then
+    install -d -m 0755 /etc/systemd/system/danted.service.d
+    cat > /etc/systemd/system/danted.service.d/awgproxy-routing.conf <<'EOF'
+[Unit]
+Requires=awgproxy-socks-routing.service
+After=awgproxy-socks-routing.service
+EOF
+    cat > /etc/systemd/system/danted.service.d/awgproxy.conf <<'EOF'
+[Unit]
+Requires=awg-quick@awg0.service
+After=awg-quick@awg0.service
+
+[Service]
+ExecStartPre=/usr/local/lib/awgproxy/dante-ready.sh
+EOF
+  fi
+}
+
+render_dns_unit() {
+  install -d -m 0755 /etc/systemd/system/unbound.service.d
+  cat > /etc/systemd/system/unbound.service.d/awgproxy.conf <<'EOF'
+[Unit]
+Requires=awgproxy-firewall.service
+After=awgproxy-firewall.service
+EOF
 }
 
 render_lan_bindings_script() {
@@ -74,10 +140,13 @@ EOF
 }
 
 render_firewall() {
-  local vpn_nft service_nft
+  local vpn_nft service_nft local_socks=''
   local geoip_set='' geoip_forward='' geoip_nat='' geoip_output='' cache prefixes
   vpn_nft=$(csv_to_nft "$VPN_CLIENT_NETWORKS")
   service_nft=$(csv_to_nft "$SERVICE_CLIENT_NETWORKS")
+  if (( ${ENABLE_SOCKS:-0} )); then
+    local_socks="iifname \"lo\" ip daddr $LAN_IP tcp dport 1080 counter accept"
+  fi
   if [[ -n ${GEOIP_COUNTRIES:-} ]]; then
     cache=$(geoip_cache) || return 1
     prefixes=$(paste -sd, "$cache") || return 1
@@ -100,6 +169,7 @@ table inet awgproxy_filter {
   chain input {
     type filter hook input priority filter; policy accept;
     ct state established,related counter accept
+    $local_socks
     iifname "$LAN_IF" ip daddr $LAN_IP ip saddr @service_clients tcp dport { 53, 1080 } counter accept
     iifname "$LAN_IF" ip daddr $LAN_IP ip saddr @service_clients udp dport 53 counter accept
     ip daddr $LAN_IP tcp dport { 53, 1080 } counter drop
@@ -168,7 +238,11 @@ EOF
 }
 
 render_dante() {
-  local client_rules='' socks_rules='' item
+  local client_rules='' socks_rules='' external_rules='external: awg0' item
+  if [[ ${SOCKS_ROUTING_MODE:-tunnel} == routes ]]; then
+    external_rules=$'external.protocol: ipv4\nexternal: awg0\n'"external: $LAN_IP"
+    external_rules+=$'\nexternal.rotation: route'
+  fi
   IFS=, read -r -a networks <<< "$SERVICE_CLIENT_NETWORKS"
   for item in "${networks[@]}"; do
     client_rules+="client pass { from: $item to: 0.0.0.0/0 }"$'\n'
@@ -177,7 +251,7 @@ render_dante() {
   cat > /etc/danted.conf <<EOF
 logoutput: syslog
 internal: $LAN_IP port = 1080
-external: awg0
+$external_rules
 clientmethod: none
 socksmethod: none
 user.privileged: proxy
@@ -214,17 +288,36 @@ set -Eeuo pipefail
 backup=${1:?backup directory required}
 [[ -e "$backup/ARMED" ]] || exit 0
 logger -t awgproxy "automatic network rollback started"
-if [[ ${2:-all} == geoip ]]; then
+section=${2:-all}
+if [[ $section == geoip || $section == dns || $section == socks || $section == services ]]; then
   source /opt/awgproxy/lib/common.sh
   source /opt/awgproxy/lib/geoip.sh
   source /opt/awgproxy/lib/render.sh
+  source /opt/awgproxy/lib/actions.sh
   cp -a "$backup/awgproxy.conf" "$AWGPROXY_CONFIG"
   load_config
-  geoip_routes_down
-  render_firewall
-  /usr/local/lib/awgproxy/firewall-apply.sh
-  geoip_routes_up
-  logger -t awgproxy "GeoIP rollback completed"
+  case $section in
+    geoip)
+      geoip_routes_down
+      render_firewall
+      /usr/local/lib/awgproxy/firewall-apply.sh
+      geoip_tunnel_policy_up
+      geoip_routes_up
+      ;;
+    socks|services)
+      render_firewall
+      if (( ENABLE_SOCKS )); then render_dante; fi
+      apply_socks_networking
+      apply_socks_service
+      ;;
+  esac
+  case $section in
+    dns|services)
+      if (( ENABLE_DNS )); then render_unbound; fi
+      apply_dns_service
+      ;;
+  esac
+  logger -t awgproxy "$section rollback completed"
   exit 0
 fi
 systemctl stop awg-quick@awg0.service 2>/dev/null || true
@@ -291,23 +384,4 @@ Requires=awgproxy-routes.service awgproxy-firewall.service
 After=awgproxy-routes.service awgproxy-firewall.service systemd-networkd.service
 PartOf=systemd-networkd.service
 EOF
-  if (( ENABLE_DNS )); then
-    install -d -m 0755 /etc/systemd/system/unbound.service.d
-    cat > /etc/systemd/system/unbound.service.d/awgproxy.conf <<'EOF'
-[Unit]
-Requires=awgproxy-firewall.service
-After=awgproxy-firewall.service
-EOF
-  fi
-  if (( ENABLE_SOCKS )); then
-    install -d -m 0755 /etc/systemd/system/danted.service.d
-    cat > /etc/systemd/system/danted.service.d/awgproxy.conf <<'EOF'
-[Unit]
-Requires=awg-quick@awg0.service
-After=awg-quick@awg0.service
-
-[Service]
-ExecStartPre=/usr/local/lib/awgproxy/dante-ready.sh
-EOF
-  fi
 }

@@ -23,7 +23,7 @@ Usage: awgproxy [command]
   menu          interactive management menu (default)
   install       initial setup or open configuration menu
   config        show redacted effective configuration
-  change [lan|awg|networks|services|geoip]
+  change [lan|awg|networks|dns|socks|geoip]
                 open configuration menu or edit one section
   status        services, tunnel, routes and listeners
   check         run readiness and safety checks
@@ -64,7 +64,7 @@ show_configuration_summary() {
     address=$(current_lan_ipv4 "$LAN_IF") || address='IPv4 недоступен'
   fi
   if (( ENABLE_DNS )); then dns='вкл.'; fi
-  if (( ENABLE_SOCKS )); then socks='вкл.'; fi
+  if (( ENABLE_SOCKS )); then socks=$(socks_routing_label); fi
 
   printf 'LAN:       %s · %s (%s) · подсеть %s · шлюз %s\n' \
     "$LAN_IF" "$address" "$mode" "$LAN_PREFIX" "$LAN_GW"
@@ -84,14 +84,15 @@ change_configuration() {
     printf '\nНастройки AWG Proxy\n\n'
     show_configuration_summary
     printf '\n  1) Настройки LAN\n  2) Настройки AmneziaWG\n  3) Сети доступа и маршруты\n'
-    printf '  4) DNS и SOCKS5\n  5) GeoIP через LAN\n  0) Назад\n\n'
+    printf '  4) Настройки DNS\n  5) Настройки SOCKS5\n  6) GeoIP через LAN\n  0) Назад\n\n'
     read -r -p 'Выбор [0]: ' choice || return 0
     case ${choice:-0} in
       1) section=lan ;;
       2) section=awg ;;
       3) section=networks ;;
-      4) section=services ;;
-      5) section=geoip ;;
+      4) section=dns ;;
+      5) section=socks ;;
+      6) section=geoip ;;
       0) return 0 ;;
       *) warn "unknown choice"; pause; continue ;;
     esac
@@ -104,7 +105,7 @@ change_configuration_section() {
   require_root
   local section=$1 backup
   case $section in
-    lan|awg|networks|services|geoip) ;;
+    lan|awg|networks|dns|socks|services|geoip) ;;
     *) die "unknown configuration section: $section" ;;
   esac
   load_config saved
@@ -115,10 +116,12 @@ change_configuration_section() {
   if [[ $section == geoip ]]; then GEOIP_DATA=$(geoip_download); fi
   backup=$(create_backup)
   info "pre-change backup: $backup"
-  if [[ $section == geoip ]]; then
-    render_rollback_script
-    arm_rollback "$backup" "$section"
-  fi
+  case $section in
+    geoip|dns|socks|services)
+      render_rollback_script
+      arm_rollback "$backup" "$section"
+      ;;
+  esac
   save_nonsecret_config
   if [[ $section == awg ]]; then prepare_awg_config "$AWG_SOURCE_CONFIG"; fi
   apply_configuration "$backup" "$section"

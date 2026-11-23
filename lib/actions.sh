@@ -53,16 +53,41 @@ disarm_rollback() {
   ok "automatic rollback disarmed; backup kept at $backup"
 }
 
+apply_dns_service() {
+  if (( ENABLE_DNS )); then
+    systemctl enable unbound
+    systemctl restart unbound
+  else
+    systemctl disable --now unbound
+  fi
+}
+
+apply_socks_service() {
+  if (( ENABLE_SOCKS )); then
+    systemctl enable danted
+    systemctl restart danted
+  else
+    systemctl disable --now danted
+  fi
+}
+
+apply_socks_networking() {
+  if (( ENABLE_SOCKS )); then danted -V -f /etc/danted.conf; fi
+  systemctl stop danted
+  /usr/local/lib/awgproxy/firewall-apply.sh
+  geoip_tunnel_policy_up
+}
+
 apply_configuration() {
   require_root
   local backup=${1:-} section=${2:-all}
   [[ -n $backup ]] || backup=$(create_backup)
-  render_runtime_files
-  /usr/local/lib/awgproxy/firewall-apply.sh check
+  render_runtime_files "$section"
+  if [[ $section != dns ]]; then /usr/local/lib/awgproxy/firewall-apply.sh check; fi
   systemctl daemon-reload
-  if [[ $section != geoip ]]; then arm_rollback "$backup" "$section"; fi
   case $section in
     all|lan|awg)
+      arm_rollback "$backup" "$section"
       sysctl --system >/dev/null
       systemctl enable awgproxy-routes awgproxy-firewall awg-quick@awg0
       systemctl stop awg-quick@awg0 2>/dev/null || true
@@ -70,20 +95,27 @@ apply_configuration() {
       systemctl restart awgproxy-routes awgproxy-firewall
       systemctl start awg-quick@awg0
       ;;
-    networks) systemctl restart awgproxy-routes awgproxy-firewall ;;
+    networks)
+      arm_rollback "$backup" "$section"
+      systemctl restart awgproxy-routes awgproxy-firewall
+      ;;
     geoip)
       geoip_routes_down
       /usr/local/lib/awgproxy/firewall-apply.sh
+      geoip_tunnel_policy_up
       geoip_routes_up
       ;;
-    services) ;;
+    socks|services) apply_socks_networking ;;
   esac
-  if [[ $section != geoip ]]; then
-    if (( ENABLE_DNS )); then systemctl enable unbound; systemctl restart unbound; else systemctl disable --now unbound 2>/dev/null || true; fi
-    if (( ENABLE_SOCKS )); then systemctl enable danted; systemctl restart danted; else systemctl disable --now danted 2>/dev/null || true; fi
-  fi
-  if validate_installation; then
-    if [[ -n ${SSH_CONNECTION:-} ]] && ! confirm "Have you opened and verified a second SSH session?"; then
+  case $section in
+    dns) apply_dns_service ;;
+    socks) apply_socks_service ;;
+    geoip) ;;
+    *) apply_dns_service; apply_socks_service ;;
+  esac
+  if validate_configuration_section "$section"; then
+    if [[ $section != dns && $section != socks && -n ${SSH_CONNECTION:-} ]] &&
+       ! confirm "Have you opened and verified a second SSH session?"; then
       warn "rollback remains armed until a second SSH session is confirmed"
       return 1
     fi
@@ -93,6 +125,22 @@ apply_configuration() {
     warn "validation failed; rollback remains armed"
     return 1
   fi
+}
+
+validate_configuration_section() {
+  case $1 in
+    dns)
+      if (( ENABLE_DNS )); then
+        service_active unbound && has_lan_listener t 53 && has_lan_listener u 53
+      else
+        ! service_active unbound
+      fi
+      ;;
+    socks)
+      if (( ENABLE_SOCKS )); then wait_for_socks_listener; else ! service_active danted; fi
+      ;;
+    *) validate_installation ;;
+  esac
 }
 
 handshake_age() {
@@ -150,7 +198,7 @@ validate_installation() {
     if geoip_routes_are_active; then
       ok "GeoIP $GEOIP_COUNTRIES: IPv4 routes via $LAN_GW and firewall sets are active"
     else
-      warn "GeoIP $GEOIP_COUNTRIES: routing or firewall rules are incomplete"
+      warn "GeoIP $GEOIP_COUNTRIES: check LAN routes, SOCKS5 tunnel policy and firewall sets"
       failures=$((failures+1))
     fi
   fi
@@ -268,5 +316,6 @@ print_config_redacted() {
   printf 'PRIVATE_ROUTES=%s\nVPN_CLIENT_NETWORKS=%s\nSERVICE_CLIENT_NETWORKS=%s\n' "$PRIVATE_ROUTES" "$VPN_CLIENT_NETWORKS" "$SERVICE_CLIENT_NETWORKS"
   printf 'GEOIP_COUNTRIES=%s\n' "$GEOIP_COUNTRIES"
   printf 'DNS=%s SOCKS=%s\n' "$ENABLE_DNS" "$ENABLE_SOCKS"
+  printf 'SOCKS_ROUTING_MODE=%s\n' "$SOCKS_ROUTING_MODE"
   printf 'Tunnel secrets: [REDACTED]\n'
 }
